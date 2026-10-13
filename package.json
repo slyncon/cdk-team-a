@@ -1,0 +1,10 @@
+{
+  "name": "cdk-team-a",
+  "private": true,
+  "scripts": {
+    "cdk": "cdk"
+  },
+  "devDependencies": {
+    "aws-cdk": "2.1145.0"
+  }
+}

@@ -17,21 +17,18 @@ this checkout to update the existing resources.
 ## Setup and versioned Platform dependency
 
 Prerequisites: Python 3.12, Node 24 LTS/npm, Git; AWS CLI v2 only for manual AWS work.
-Replace **OWNER** in `requirements.txt` with the actual GitHub owner of the public
-Platform repository. Publish Platform and its `v0.1.0` tag before attempting this
-installation or running hosted team CI:
+Both teams consume the Platform repository at the same tested release:
 
 ```text
-cdk-launchpad @ git+https://github.com/OWNER/cdk-launchpad-platform.git@v0.1.0
+cdk-launchpad @ git+https://github.com/slyncon/partenamut-cdk-use-case.git@v0.1.0
 ```
 
 The Python distribution is `cdk-launchpad`; its imports use `cdk_launchpad`.
 No package registry, AWS credentials, or GitHub Secrets are needed to install a
-public tagged source dependency. The remote URL/tag remains unverified until
-published. For initial local preparation only, install the sibling Platform
-source or its built wheel instead of fetching the unresolved URL.
+public tagged source dependency. The dependency is a regular installation from the Platform release, independent
+of sibling directories. Local environments and generated assets are ignored by Git.
 
-From this project's root, after publication:
+From this project's root:
 
 ```bash
 python3.12 -m venv .venv
@@ -39,12 +36,6 @@ source .venv/bin/activate
 python -m pip install -r requirements.txt -r requirements-dev.txt
 npm ci
 export PATH="$PWD/node_modules/.bin:$PATH"
-```
-
-Before publication, the Python install line can instead be:
-
-```bash
-python -m pip install ../cdk-launchpad-platform -r requirements-dev.txt
 ```
 
 Each repository owns its environment, test/lint settings, and pinned CDK CLI
@@ -69,8 +60,7 @@ configuration paths and disables metadata discovery without authenticating to AW
 
 `.github/workflows/ci.yml` runs these steps on PRs targeting `main` and pushes to
 `main`, using Python 3.12, Node 24, standard Ubuntu runners and `contents: read`.
-It installs the pinned tagged Platform dependency and never deploys. Its first
-remote package installation and hosted run remain publication-time checks.
+It installs the pinned tagged Platform dependency and never deploys. Check the repository Actions tab for the hosted result.
 
 Tests mock boto3 reads, reject invalid JSON/fields, verify repeat-safe behavior,
 assert platform consumption and notification/resource identities, and exercise
