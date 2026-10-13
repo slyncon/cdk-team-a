@@ -1,10 +1,13 @@
-name: CI
+name: CI and sandbox deployment
 
 on:
   push:
     branches: [main]
   pull_request:
     branches: [main]
+  workflow_dispatch:
+  schedule:
+    - cron: "23 6 * * 1"
 
 permissions:
   contents: read
@@ -13,31 +16,151 @@ jobs:
   validate:
     name: Validate team
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     env:
       AWS_EC2_METADATA_DISABLED: "true"
       AWS_CONFIG_FILE: /tmp/cdk-launchpad-no-aws-config
       AWS_SHARED_CREDENTIALS_FILE: /tmp/cdk-launchpad-no-aws-credentials
+    outputs:
+      assembly_digest: ${{ steps.digest.outputs.value }}
+      deployment_ready: ${{ steps.readiness.outputs.ready }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: actions/setup-python@v7
+          fetch-depth: 0
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.12"
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: "24"
-      - name: Install pinned dependencies
+      - name: Scan Git history for secrets
+        uses: gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e # v3
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITLEAKS_VERSION: "8.30.1"
+          GITLEAKS_ENABLE_COMMENTS: "false"
+          GITLEAKS_ENABLE_UPLOAD_ARTIFACT: "false"
+      - name: Install immutable source and hashed dependencies
         run: |
-          python -m pip install -r requirements.txt -r requirements-dev.txt
+          python -m pip install --require-hashes -r requirements.lock
+          python -m pip install --no-deps --no-build-isolation -r requirements.txt
+          python -m pip check
           npm ci
           echo "$PWD/node_modules/.bin" >> "$GITHUB_PATH"
-      - name: Lint and test
+      - name: Lint, test, and scan application code and dependencies
         run: |
           python -m ruff check .
           python -m pytest -q
-      - name: Synthesize and validate
+          python -m bandit -r handler app.py stack.py scripts -ll
+          python -m pip_audit --require-hashes --disable-pip -r requirements.lock
+          npm audit --audit-level=high
+      - name: Synthesize and enforce infrastructure policy
         run: |
           cdk synth
           cdk-launchpad-validate .build/cdk.out
+          python scripts/check_assembly.py .build/cdk.out
+      - name: Record assembly integrity
+        id: digest
+        run: |
+          find .build/cdk.out -type f -print0 | sort -z | xargs -0 sha256sum > .build/assembly.sha256
+          echo "value=$(sha256sum .build/assembly.sha256 | cut -d ' ' -f 1)" >> "$GITHUB_OUTPUT"
+      - name: Check server-side deployment protection
+        id: readiness
+        if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+        run: python scripts/check_github_environment.py
+      - name: Save validated deployment assembly
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: claims-assembly-${{ github.sha }}
+          path: |
+            .build/cdk.out/
+            .build/assembly.sha256
+          if-no-files-found: error
+          retention-days: 7
+
+  deploy:
+    name: Deploy Claims sandbox
+    needs: validate
+    if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && needs.validate.outputs.deployment_ready == 'true' && vars.ENABLE_SANDBOX_DEPLOYMENT == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    environment: sandbox
+    concurrency:
+      group: claims-sandbox-deployment
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      AWS_ACCOUNT_ID: ${{ vars.AWS_ACCOUNT_ID }}
+      AWS_REGION: ${{ vars.AWS_REGION }}
+      AWS_DEFAULT_REGION: ${{ vars.AWS_REGION }}
+      CHANGE_SET: claims-${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "24"
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: claims-assembly-${{ github.sha }}
+          path: .build
+      - name: Verify the exact validated assembly and install tooling
+        env:
+          EXPECTED_DIGEST: ${{ needs.validate.outputs.assembly_digest }}
+        run: |
+          printf '%s  %s\n' "$EXPECTED_DIGEST" .build/assembly.sha256 | sha256sum -c -
+          sha256sum -c .build/assembly.sha256
+          python -m pip install --require-hashes -r requirements.lock
+          python -m pip install --no-deps --no-build-isolation -r requirements.txt
+          npm ci
+          echo "$PWD/node_modules/.bin" >> "$GITHUB_PATH"
+          cdk-launchpad-validate .build/cdk.out
+          python scripts/check_assembly.py .build/cdk.out
+      - name: Require configured sandbox destination
+        env:
+          AWS_ROLE_ARN: ${{ vars.AWS_ROLE_ARN }}
+        run: |
+          test -n "$AWS_ACCOUNT_ID"
+          test -n "$AWS_REGION"
+          case "$AWS_ROLE_ARN" in
+            "arn:aws:iam::$AWS_ACCOUNT_ID:role/"*) ;;
+            *) echo "Deployment role must belong to the configured account"; exit 1 ;;
+          esac
+      - name: Reject stale main revisions before AWS access
+        run: test "$(git ls-remote origin refs/heads/main | cut -f 1)" = "$GITHUB_SHA"
+      - name: Obtain short-lived AWS credentials through OIDC
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+          allowed-account-ids: ${{ vars.AWS_ACCOUNT_ID }}
+          role-session-name: claims-${{ github.run_id }}
+          role-duration-seconds: 3600
+          unset-current-credentials: true
+      - name: Review diff and prepare deployment without executing it
+        run: |
+          aws sts get-caller-identity
+          cdk diff ClaimsTeamStack --app .build/cdk.out --change-set false
+          cdk deploy ClaimsTeamStack --app .build/cdk.out --method prepare-change-set --change-set-name "$CHANGE_SET" --require-approval never
+      - name: Reject bucket removal or replacement
+        id: safety
+        run: python scripts/check_changeset.py "$CHANGE_SET"
+      - name: Execute the checked change set
+        if: steps.safety.outputs.execute == 'true'
+        run: |
+          test "$(git ls-remote origin refs/heads/main | cut -f 1)" = "$GITHUB_SHA"
+          cdk deploy ClaimsTeamStack --app .build/cdk.out --method execute-change-set --change-set-name "$CHANGE_SET" --require-approval never
+      - name: Record deployed commit and resource outputs
+        run: |
+          echo "### Claims sandbox deployment" >> "$GITHUB_STEP_SUMMARY"
+          echo "Commit: $GITHUB_SHA" >> "$GITHUB_STEP_SUMMARY"
+          aws cloudformation describe-stacks --stack-name ClaimsTeamStack --query 'Stacks[0].Outputs' --output table >> "$GITHUB_STEP_SUMMARY"

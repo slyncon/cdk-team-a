@@ -9,64 +9,85 @@ fixtures, tests, and project/CI settings. Shared implementations are not copied.
 team S3 bucket → incoming/*.json notification → team Python Lambda → application logs
 ```
 
-This project targets the **existing deployed ClaimsTeamStack**. Its app/stack/handler,
-construct paths, logical IDs, outputs, and CDK settings are preserved. A new local
-directory does not create a new stack identity. Review the live diff before using
-this checkout to update the existing resources.
+This project deploys **ClaimsTeamStack** to the account selected in the GitHub
+`sandbox` environment. The personal account will get a fresh stack. Its app/stack/handler,
+construct paths, logical IDs, and outputs are preserved. The synthesizer now uses
+dedicated deployment roles, bounded Lambda permissions, and a Claims asset prefix. Stack identity includes its AWS account and region. The corporate sandbox stack
+is separate and remains untouched. Review the diff before updating any existing stack.
 
-## Setup and versioned Platform dependency
+## Setup and immutable Platform dependency
 
-Prerequisites: Python 3.12, Node 24 LTS/npm, Git; AWS CLI v2 only for manual AWS work.
-Both teams consume the Platform repository at the same tested release:
+Team A uses Platform **0.1.1**, pinned to a full Git commit in `requirements.txt`.
+`requirements.lock` pins third-party runtime, build, and validation dependencies,
+including their distribution hashes. CI actions are pinned to full commits too.
+Moving a release tag cannot change this team's installed Platform source.
 
-```text
-cdk-launchpad @ git+https://github.com/slyncon/partenamut-cdk-use-case.git@v0.1.0
-```
-
-The Python distribution is `cdk-launchpad`; its imports use `cdk_launchpad`.
-No package registry, AWS credentials, or GitHub Secrets are needed to install a
-public tagged source dependency. The dependency is a regular installation from the Platform release, independent
-of sibling directories. Local environments and generated assets are ignored by Git.
-
-From this project's root:
+Prerequisites: Python 3.12, Node 24 LTS/npm, Git. AWS CLI v2 is needed only for
+local AWS work; GitHub obtains temporary AWS credentials through OIDC.
 
 ```bash
 python3.12 -m venv .venv
 source .venv/bin/activate
-python -m pip install -r requirements.txt -r requirements-dev.txt
+python -m pip install --require-hashes -r requirements.lock
+python -m pip install --no-deps --no-build-isolation -r requirements.txt
+python -m pip check
 npm ci
 export PATH="$PWD/node_modules/.bin:$PATH"
-```
-
-Each repository owns its environment, test/lint settings, and pinned CDK CLI
-(`2.1145.0`). The Platform dependency pins the compatible Python CDK library.
-To upgrade independently, change this team's ref to a newly published tag such
-as `@v0.1.1`, run `python -m pip install --upgrade -r requirements.txt`, then rerun
-all checks and the live diff. Other teams keep their chosen version.
-
-## Offline checks and CI
-
-```bash
 python -m ruff check .
 python -m pytest -q
 cdk synth
 cdk-launchpad-validate .build/cdk.out
+python scripts/check_assembly.py .build/cdk.out
 ```
 
-These commands require no AWS credentials or resource lookups. The CLI saves the
-CloudFormation template and handler assets in `.build/cdk.out/`. A configured
-profile may cause read-only account-resolution calls locally. CI sets empty AWS
-configuration paths and disables metadata discovery without authenticating to AWS.
+Local tests and synthesis need no AWS credentials. For a deliberate dependency
+update, change the Platform commit and `requirements-deps.in` as needed, then run:
 
-`.github/workflows/ci.yml` runs these steps on PRs targeting `main` and pushes to
-`main`, using Python 3.12, Node 24, standard Ubuntu runners and `contents: read`.
-It installs the pinned tagged Platform dependency and never deploys. Check the repository Actions tab for the hosted result.
+```bash
+pip-compile --generate-hashes --allow-unsafe --strip-extras --no-header \
+  --no-annotate --output-file requirements.lock requirements-deps.in
+python -m pip install --require-hashes -r requirements.lock
+python -m pip install --no-deps --no-build-isolation -r requirements.txt
+python -m pip check
+```
 
-Tests mock boto3 reads, reject invalid JSON/fields, verify repeat-safe behavior,
-assert platform consumption and notification/resource identities, and exercise
-secure/insecure synthesized templates through the installed shared validator.
-The validator checks every S3 bucket, including raw buckets bypassing the shared
-construct; violations exit 1 with resource-specific messages.
+Review the lockfile diff and run all checks before merging. Team B remains on its
+selected previous Platform version until it chooses to upgrade. Dependabot opens
+updates for tooling; Platform source upgrades remain deliberate.
+
+## Validation and automated deployment
+
+`.github/workflows/ci.yml` has **two separate jobs**:
+
+- **Validate team**: secret scan, hash-locked installation, lint/tests, Python and
+  dependency scans, CDK synthesis, and infrastructure policy validation. No AWS access.
+- **Deploy Claims sandbox**: runs only after validation, for `main` pushes or a manual
+  workflow run on `main`. It uses the saved validated assembly and short-lived OIDC
+  credentials, prepares a change set, rejects bucket deletion/replacement, and
+  executes safe changes. PRs and scheduled scans never deploy.
+
+Deployment stays disabled until GitHub has a `sandbox` environment allowing only
+`main`, and protected `main` requires `Validate team`. A repository variable
+`ENABLE_SANDBOX_DEPLOYMENT=true` must also be set after personal-account setup;
+it is deliberately unset during preparation. The environment supplies the non-secret
+AWS account/region/role variables. The deployment job rechecks assembly hashes and
+policy before obtaining AWS credentials. Jobs never bootstrap or destroy stacks.
+
+See [Platform deployment setup](https://github.com/slyncon/partenamut-cdk-use-case/blob/main/DEPLOYMENT.md)
+for the exact one-time IAM setup, GitHub settings, credential explanation, and
+permission limits. No AWS access keys or SSO tokens should be stored in GitHub.
+
+To run now: **Actions → CI and sandbox deployment → Run workflow → main**.
+Expand `Validate team`, followed by `Deploy Claims sandbox`. The summary records
+the deployed commit and actual resource outputs. A skipped deployment means the
+server-side setup gate is not ready; check its validation-step message.
+
+The shared S3 check rejects missing encryption, public-access flags or TLS denial,
+including raw buckets bypassing `SecureBucket`. The Claims check additionally
+requires the dedicated CloudFormation role, runtime boundaries on every Lambda
+role, supported application resources, and the scoped bootstrap asset prefix.
+Tests prove these bypasses fail. Review protection is necessary to stop checks
+being removed; CODEOWNERS alone does not enforce reviews.
 
 ## Security demonstration and branch protection
 
@@ -107,25 +128,26 @@ and [Actions billing](https://docs.github.com/en/billing/concepts/product-billin
 
 ## Manual AWS deployment
 
-Use the existing `partenamut-sso` profile, account **851725255087**, deployment region
-**eu-central-1**, and SSO authentication region **eu-west-1**. Check sandbox
+Complete the Platform IAM setup above first. Use an authenticated profile for your **personal** AWS account. Account, deployment
+region, and OIDC role are GitHub environment variables; no corporate profile or
+account is used by Actions. Check sandbox
 billing/budget; small fixtures and short application log retention do not guarantee
-no charges. All commands below are human-operated. Refresh SSO if needed:
+no charges. All commands below are human-operated. Configure these variables for your personal
+account before running commands:
 
 ```bash
-aws sso login --profile partenamut-sso
-aws sts get-caller-identity --profile partenamut-sso
-export AWS_REGION=eu-central-1
-export AWS_DEFAULT_REGION=eu-central-1
+export PERSONAL_AWS_PROFILE="<your-personal-account-profile>"
+export AWS_REGION="<your-deployment-region>"
+export AWS_DEFAULT_REGION="$AWS_REGION"
+aws sts get-caller-identity --profile "$PERSONAL_AWS_PROFILE"
 
-cdk synth --profile partenamut-sso
+cdk synth --profile "$PERSONAL_AWS_PROFILE"
 cdk-launchpad-validate .build/cdk.out
 
-# Only if this account/region needs CDK bootstrap resources; skip if already ready.
-cdk bootstrap --profile partenamut-sso
+# Existing sandbox bootstrap is reused; automated jobs never bootstrap.
 
-cdk diff ClaimsTeamStack --profile partenamut-sso
-cdk deploy ClaimsTeamStack --profile partenamut-sso
+cdk diff ClaimsTeamStack --profile "$PERSONAL_AWS_PROFILE"
+cdk deploy ClaimsTeamStack --profile "$PERSONAL_AWS_PROFILE"
 ```
 
 Confirm the expected account/region. Review the diff and permission prompt. Stop
@@ -137,15 +159,15 @@ migration. CloudFormation outputs provide actual resource names.
 ```bash
 CLAIMS_BUCKET=$(aws cloudformation describe-stacks --stack-name ClaimsTeamStack \
   --query "Stacks[0].Outputs[?OutputKey=='BucketName'].OutputValue | [0]" --output text \
-  --profile partenamut-sso --region eu-central-1)
+  --profile "$PERSONAL_AWS_PROFILE" --region "$AWS_REGION")
 CLAIMS_LOG_GROUP=$(aws cloudformation describe-stacks --stack-name ClaimsTeamStack \
   --query "Stacks[0].Outputs[?OutputKey=='LogGroupName'].OutputValue | [0]" --output text \
-  --profile partenamut-sso --region eu-central-1)
+  --profile "$PERSONAL_AWS_PROFILE" --region "$AWS_REGION")
 
 aws s3 cp fixtures/claim.json "s3://$CLAIMS_BUCKET/incoming/claim.json" \
-  --profile partenamut-sso --region eu-central-1
+  --profile "$PERSONAL_AWS_PROFILE" --region "$AWS_REGION"
 aws logs tail "$CLAIMS_LOG_GROUP" --since 10m \
-  --profile partenamut-sso --region eu-central-1
+  --profile "$PERSONAL_AWS_PROFILE" --region "$AWS_REGION"
 ```
 
 Stop if an output is empty or `None`. Notifications are asynchronous; wait briefly
@@ -157,25 +179,25 @@ repeat. Durable retries/dead-letter handling are outside this phase.
 
 ## Manual cleanup
 
-Migration does not require cleanup of the existing stack. When deliberately
+No corporate resources are changed by the personal-account deployment. When deliberately
 finishing the disposable demo, verify identity and the bucket's actual stack output,
 then list its contents before any deletion:
 
 ```bash
-aws sts get-caller-identity --profile partenamut-sso
+aws sts get-caller-identity --profile "$PERSONAL_AWS_PROFILE"
 aws cloudformation describe-stacks --stack-name ClaimsTeamStack \
   --query 'Stacks[0].Outputs' --output table \
-  --profile partenamut-sso --region eu-central-1
+  --profile "$PERSONAL_AWS_PROFILE" --region "$AWS_REGION"
 aws s3 ls "s3://$CLAIMS_BUCKET/" --recursive \
-  --profile partenamut-sso --region eu-central-1
+  --profile "$PERSONAL_AWS_PROFILE" --region "$AWS_REGION"
 ```
 
 Only after confirming this is the disposable demo bucket:
 
 ```bash
 aws s3 rm "s3://$CLAIMS_BUCKET/" --recursive \
-  --profile partenamut-sso --region eu-central-1
-cdk destroy ClaimsTeamStack --profile partenamut-sso
+  --profile "$PERSONAL_AWS_PROFILE" --region "$AWS_REGION"
+cdk destroy ClaimsTeamStack --profile "$PERSONAL_AWS_PROFILE"
 ```
 
 Empty the bucket before deletion. `DESTROY` is demo-only and automatic object
@@ -183,6 +205,6 @@ deletion is disabled; meaningful data would normally merit `RETAIN`. Application
 log groups are removed with the stack. Do not destroy shared `CDKToolkit`;
 bootstrap assets and notification-helper logs follow the sandbox owner's lifecycle.
 
-Future automated deployment could use separate protected GitHub Actions workflows
-and GitHub OIDC with narrowly scoped AWS roles and approvals. No OIDC, AWS keys,
-Secrets, or deployment automation are implemented in this phase.
+OIDC deployment is implemented for this sandbox pilot. Organization-wide policy
+enforcement and automatic production deployment remain future work. See the
+Platform setup guide for boundaries, branch protections, and limitations.

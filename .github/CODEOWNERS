@@ -1,0 +1,6 @@
+# Platform review for deployment, policies, and dependency changes.
+/.github/ @slyncon
+/app.py @slyncon
+/scripts/ @slyncon
+/requirements* @slyncon
+/package*.json @slyncon

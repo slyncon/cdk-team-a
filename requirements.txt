@@ -1,1 +1,2 @@
-cdk-launchpad @ git+https://github.com/slyncon/partenamut-cdk-use-case.git@v0.1.0
+# Platform 0.1.1; immutable source revision, not a movable tag.
+cdk-launchpad @ git+https://github.com/slyncon/partenamut-cdk-use-case.git@dbdb9ca2296d66e03665c6042f7d28c03aeec9e5
