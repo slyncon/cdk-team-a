@@ -3,87 +3,147 @@ from pathlib import Path
 
 import pytest
 import yaml
-from aws_cdk import App, Aws, DefaultStackSynthesizer
-from aws_cdk import aws_iam as iam
+from aws_cdk import App, Environment
 
 from scripts.check_assembly import check_assembly
 from stack import ClaimsTeamStack
 
 
-@pytest.fixture
-def assembly(tmp_path):
+@pytest.fixture(params=[False, True])
+def assembly(tmp_path, request):
     app = App(outdir=str(tmp_path / "assembly"))
-    stack = ClaimsTeamStack(
-        app,
-        "ClaimsTeamStack",
-        synthesizer=DefaultStackSynthesizer(
-            deploy_role_arn="",
-            file_asset_publishing_role_arn="",
-            lookup_role_arn="",
-            bucket_prefix="claims/",
-            cloud_formation_execution_role=(
-                "arn:${AWS::Partition}:iam::${AWS::AccountId}:role/CDKLaunchpad-TeamA-CloudFormation"
-            ),
-        ),
-    )
-    iam.PermissionsBoundary.of(stack).apply(
-        iam.ManagedPolicy.from_managed_policy_arn(
-            stack,
-            "Boundary",
-            f"arn:{Aws.PARTITION}:iam::{Aws.ACCOUNT_ID}:policy/CDKLaunchpad-TeamA-LambdaBoundary",
-        )
-    )
+    kwargs = {}
+    if request.param:
+        kwargs["env"] = Environment(account="000000000000", region="eu-central-1")
+    ClaimsTeamStack(app, "ClaimsTeamStack", **kwargs)
     app.synth()
     return tmp_path / "assembly"
 
 
-def test_current_assembly_passes(assembly):
+def test_standard_bootstrap_and_owned_boundary_pass(assembly):
     check_assembly(assembly)
 
 
 @pytest.mark.parametrize(
-    "bypass", ["missing-boundary", "other-service", "bootstrap-role", "foreign-trust"]
+    "bypass",
+    [
+        "missing-boundary",
+        "external-boundary",
+        "other-service",
+        "custom-execution-role",
+        "foreign-trust",
+        "broad-boundary",
+        "write-boundary",
+        "custom-publishing-role",
+        "forbidden-name",
+        "forbidden-tag",
+    ],
 )
-def test_deployment_policy_bypasses_fail(assembly, bypass):
+def test_security_bypasses_and_missing_external_dependencies_fail(assembly, bypass):
     path = assembly / "ClaimsTeamStack.template.json"
     template = json.loads(path.read_text())
+    role = next(r for r in template["Resources"].values() if r["Type"] == "AWS::IAM::Role")
+    policy = next(
+        r for r in template["Resources"].values() if r["Type"] == "AWS::IAM::ManagedPolicy"
+    )
     if bypass == "missing-boundary":
-        role = next(r for r in template["Resources"].values() if r["Type"] == "AWS::IAM::Role")
         del role["Properties"]["PermissionsBoundary"]
-        path.write_text(json.dumps(template))
+    elif bypass == "external-boundary":
+        role["Properties"]["PermissionsBoundary"] = "arn:aws:iam::000000000000:policy/deleted"
     elif bypass == "foreign-trust":
-        role = next(r for r in template["Resources"].values() if r["Type"] == "AWS::IAM::Role")
         role["Properties"]["AssumeRolePolicyDocument"]["Statement"][0]["Principal"] = {"AWS": "*"}
-        path.write_text(json.dumps(template))
     elif bypass == "other-service":
         template["Resources"]["Unexpected"] = {"Type": "AWS::SQS::Queue"}
-        path.write_text(json.dumps(template))
-    else:
+    elif bypass == "broad-boundary":
+        policy["Properties"]["PolicyDocument"]["Statement"][0]["Resource"] = "*"
+    elif bypass == "write-boundary":
+        policy["Properties"]["PolicyDocument"]["Statement"][1]["Action"] = "s3:PutObject"
+    elif bypass == "forbidden-name":
+        role["Properties"]["RoleName"] = "partenamut-reader"
+    elif bypass == "forbidden-tag":
+        role["Properties"]["Tags"] = [{"Key": "Project", "Value": "partenamut"}]
+    elif bypass == "custom-execution-role":
         manifest_path = assembly / "manifest.json"
         manifest = json.loads(manifest_path.read_text())
-        manifest["artifacts"]["ClaimsTeamStack"]["properties"]["assumeRoleArn"] = "admin"
+        manifest["artifacts"]["ClaimsTeamStack"]["properties"]["cloudFormationExecutionRoleArn"] = (
+            "arn:aws:iam::000000000000:role/deleted-custom-role"
+        )
         manifest_path.write_text(json.dumps(manifest))
+    else:
+        manifest = json.loads((assembly / "manifest.json").read_text())
+        assets_path = (
+            assembly / manifest["artifacts"]["ClaimsTeamStack.assets"]["properties"]["file"]
+        )
+        assets = json.loads(assets_path.read_text())
+        for asset in assets["files"].values():
+            for destination in asset["destinations"].values():
+                destination["assumeRoleArn"] = "arn:aws:iam::000000000000:role/deleted-publisher"
+        assets_path.write_text(json.dumps(assets))
+    path.write_text(json.dumps(template))
     with pytest.raises(ValueError):
         check_assembly(assembly)
 
 
-def test_deployment_job_requires_validation_and_has_exclusive_oidc_access():
-    path = Path(__file__).resolve().parents[1] / ".github/workflows/ci.yml"
-    workflow = yaml.safe_load(path.read_text())
-    jobs = workflow["jobs"]
-    assert jobs["deploy"]["needs"] == "validate"
-    assert jobs["deploy"]["environment"] == "sandbox"
-    assert "refs/heads/main" in jobs["deploy"]["if"]
-    assert "vars.ENABLE_SANDBOX_DEPLOYMENT" in jobs["deploy"]["if"]
-    assert jobs["deploy"]["permissions"]["id-token"] == "write"
-    assert "permissions" not in jobs["validate"]
+def test_boundary_has_no_cloudformation_dependency_cycle(assembly):
+    resources = json.loads((assembly / "ClaimsTeamStack.template.json").read_text())["Resources"]
+
+    def references(value):
+        found = set()
+        if isinstance(value, dict):
+            if "Ref" in value and value["Ref"] in resources:
+                found.add(value["Ref"])
+            if "Fn::GetAtt" in value:
+                target = value["Fn::GetAtt"][0]
+                if target in resources:
+                    found.add(target)
+            for child in value.values():
+                found.update(references(child))
+        elif isinstance(value, list):
+            for child in value:
+                found.update(references(child))
+        return found
+
+    graph = {}
+    for name, resource in resources.items():
+        dependencies = resource.get("DependsOn", [])
+        if isinstance(dependencies, str):
+            dependencies = [dependencies]
+        graph[name] = references(resource) | set(dependencies)
+
+    def visit(name, ancestors):
+        assert name not in ancestors, f"Resource dependency cycle: {ancestors} → {name}"
+        for dependency in graph.get(name, []):
+            visit(dependency, ancestors | {name})
+
+    for name in graph:
+        visit(name, set())
+
+
+def test_active_ci_has_no_aws_deployment_or_oidc_permissions():
+    root = Path(__file__).resolve().parents[1]
+    workflow = yaml.safe_load((root / ".github/workflows/ci.yml").read_text())
+    assert set(workflow["jobs"]) == {"validate"}
     assert workflow["permissions"] == {"contents": "read"}
-    assert jobs["deploy"]["concurrency"]["cancel-in-progress"] is False
-    for job in jobs.values():
-        for step in job["steps"]:
-            if action := step.get("uses"):
-                assert len(action.rsplit("@", 1)[1]) == 40
-    deploy_commands = "\n".join(s.get("run", "") for s in jobs["deploy"]["steps"])
-    assert "--app .build/cdk.out" in deploy_commands
-    assert "cdk synth" not in deploy_commands
-    assert "scripts/check_changeset.py" in deploy_commands
+    job = workflow["jobs"]["validate"]
+    assert "permissions" not in job and "environment" not in job
+    commands = "\n".join(step.get("run", "") for step in job["steps"])
+    for forbidden in ["cdk deploy", "cdk bootstrap", "cdk destroy", "check_github_environment"]:
+        assert forbidden not in commands
+    for expected in [
+        "pytest",
+        "ruff",
+        "bandit",
+        "pip_audit",
+        "npm audit",
+        "cdk synth",
+        "cdk-launchpad-validate",
+        "check_assembly",
+    ]:
+        assert expected in commands
+    for step in job["steps"]:
+        if action := step.get("uses"):
+            assert len(action.rsplit("@", 1)[1]) == 40
+            assert "configure-aws-credentials" not in action
+    archive = yaml.safe_load((root / "future/oidc-deployment.yml.disabled").read_text())
+    assert archive["jobs"]["deploy"]["if"].startswith("${{ false }}")
+    assert not list((root / ".github/workflows").glob("*deploy*"))

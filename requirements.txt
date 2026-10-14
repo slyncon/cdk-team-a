@@ -1,2 +1,2 @@
-# Platform 0.1.1; immutable source revision, not a movable tag.
-cdk-launchpad @ git+https://github.com/slyncon/partenamut-cdk-use-case.git@dbdb9ca2296d66e03665c6042f7d28c03aeec9e5
+# Platform 0.1.2: explicitly adopt generic AWS naming and S3 encryption/public-access/TLS checks.
+cdk-launchpad @ git+https://github.com/slyncon/partenamut-cdk-use-case.git@33807b7bd6aec37cde1df0082fd1073b09fc55f3
