@@ -36,12 +36,12 @@ credentials, OIDC, Inspector activation or infrastructure changes are included.*
 | Scenario | Data | Expected Security Scan | Release eligible |
 |---|---|---|---|
 | `real` (default) | Actual source, validated assembly, live advisories/CISA | Depends on findings; currently BLOCK | Passes only if real policy approves; otherwise fails |
-| `clean` | SYNTHETIC / PRESENTATION ONLY | PASS (green) | Skipped |
-| `high-cvss` | SYNTHETIC / PRESENTATION ONLY, Critical / 9.8 | BLOCK (red, expected) | Skipped |
-| `kev` | SYNTHETIC / PRESENTATION ONLY, Medium / mocked KEV | BLOCK (red, expected) | Skipped |
-| `exception-approved` | SYNTHETIC / PRESENTATION ONLY, High / scoped approval | ALLOW WITH EXCEPTION (green) | Skipped |
-| `exception-expired` | SYNTHETIC / PRESENTATION ONLY, expired approval | BLOCK (red, expected) | Skipped |
-| `combined-risk` | SYNTHETIC / PRESENTATION ONLY, Critical + mocked KEV | BLOCK (red, expected), both reasons | Skipped |
+| `clean` | SYNTHETIC / PRESENTATION ONLY | PASS (green) | Withheld |
+| `high-cvss` | SYNTHETIC / PRESENTATION ONLY, Critical / 9.8 | BLOCK (red, expected) | Withheld |
+| `kev` | SYNTHETIC / PRESENTATION ONLY, Medium / mocked KEV | BLOCK (red, expected) | Withheld |
+| `exception-approved` | SYNTHETIC / PRESENTATION ONLY, High / scoped approval | ALLOW WITH EXCEPTION (green) | Withheld |
+| `exception-expired` | SYNTHETIC / PRESENTATION ONLY, expired approval | BLOCK (red, expected) | Withheld |
+| `combined-risk` | SYNTHETIC / PRESENTATION ONLY, Critical + mocked KEV | BLOCK (red, expected), both reasons | Withheld |
 
 Automatic push, PR and Monday schedule runs always select `real`. Synthetic runs
 still validate the application but skip real scanners in Security Scan. They use
@@ -89,6 +89,11 @@ were added for this presentation. The fake CVEs are not claims about real produc
 There are no application containers; image scanning is not applicable. Existing
 Gitleaks scans history. Bandit, pip-audit and npm audit remain: they overlap SAST
 and dependency checks but retain existing independent coverage and early failures.
+Their existing hard gates remain stricter: pip-audit blocks any advisory and npm
+audit blocks High/Critical, even if the new Trivy gate could accept an exception.
+A new-gate exception cannot override failed validation. The presentation simulates
+approval without weakening those existing checks; aligning their policies with
+one exception authority would need a separately reviewed coverage change.
 
 **Current real baseline (15 October 2026):** zero dependency CVEs. Semgrep reports
 `httpsconnection-detected`, a Medium audit notice about version-dependent TLS
@@ -155,9 +160,10 @@ interpret an expected red synthetic demonstration as a broken installation.
 Manually require **Validate team**, **Security Scan** and **Release eligible** on
 `main`, require up-to-date checks and CODEOWNERS/independent reviews, and restrict
 bypasses. Genuine `Release eligible` runs even after upstream failure and fails
-unless validation and security both approve. Synthetic runs use a differently
-named, skipped `SYNTHETIC - no release approval` check: GitHub treats skipped
-checks as successful, so they must never replace the required genuine check.
+unless validation and security both approve. Synthetic runs emit a differently
+named `SYNTHETIC - no release approval` check and record refusal of approval.
+Their success never replaces the required genuine check. A skipped genuine job
+would count as successful in GitHub protection, which is why it fails explicitly.
 Branch protection is currently **not configured**
 (verified via GitHub API); the workflow does not configure it. Future deployment
 jobs must depend on genuine eligibility and bind deployment to the verified SHA

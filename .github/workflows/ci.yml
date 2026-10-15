@@ -1,4 +1,5 @@
 name: CI
+run-name: CI / ${{ github.event_name == 'workflow_dispatch' && inputs.scenario || 'real' }} / ${{ github.ref_name }}
 
 on:
   push:
@@ -153,21 +154,24 @@ jobs:
           retention-days: 7
 
   release-eligible:
-    # Skipped checks count as successful in branch protection. Synthetic runs must
-    # never create/replace the required genuine 'Release eligible' check context.
+    # Always execute so GitHub resolves the display name even for synthetic runs.
+    # Synthetic runs must never replace the required genuine check context.
     name: ${{ github.event_name == 'workflow_dispatch' && inputs.scenario != 'real' && 'SYNTHETIC - no release approval' || 'Release eligible' }}
     needs: [validate, security]
-    if: >-
-      always() &&
-      (github.event_name != 'workflow_dispatch' || inputs.scenario == 'real')
+    if: always()
     runs-on: ubuntu-latest
     steps:
       - name: Record approval of this commit and validated artifact (no deployment)
         env:
           SOURCE_SHA: ${{ github.sha }}
           ASSEMBLY_DIGEST: ${{ needs.validate.outputs.assembly_digest }}
+          SCENARIO: ${{ github.event_name == 'workflow_dispatch' && inputs.scenario || 'real' }}
           APPROVED: ${{ needs.validate.result == 'success' && needs.security.result == 'success' && needs.security.outputs.release_eligible == 'true' }}
         run: |
+          if [ "$SCENARIO" != 'real' ]; then
+            echo "SYNTHETIC / PRESENTATION ONLY: release approval withheld. Run real to assess this commit." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
           if [ "$APPROVED" != 'true' ]; then
             echo "Release blocked: genuine validation and security approval are required." >> "$GITHUB_STEP_SUMMARY"
             exit 1

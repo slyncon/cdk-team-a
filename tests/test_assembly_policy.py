@@ -152,9 +152,11 @@ def test_active_ci_has_no_aws_deployment_or_oidc_permissions():
     assert security["name"] == "Security Scan" and security["needs"] == "validate"
     release = workflow["jobs"]["release-eligible"]
     assert "release_eligible == 'true'" in release["steps"][0]["env"]["APPROVED"]
-    assert "inputs.scenario == 'real'" in release["if"] and "always()" in release["if"]
+    assert release["if"] == "always()"
+    assert "inputs.scenario != 'real'" in release["name"]
     assert "SYNTHETIC - no release approval" in release["name"]
     assert "exit 1" in release["steps"][0]["run"]
+    assert 'if [ "$SCENARIO" != \'real\' ]' in release["steps"][0]["run"]
     # PyYAML's YAML 1.1 parser reads GitHub's unquoted 'on' key as True.
     triggers = workflow.get("on", workflow.get(True))
     assert set(triggers) == {"push", "pull_request", "workflow_dispatch", "schedule"}
