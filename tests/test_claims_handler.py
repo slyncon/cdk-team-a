@@ -41,12 +41,12 @@ def test_success_multiple_records_decoding_and_read_only(monkeypatch, caplog):
     s3, client = mock_s3(monkeypatch, module, payload)
     with caplog.at_level(logging.INFO):
         result = module.handler(
-            event("incoming%2Ffake+document.json", "incoming/second.json"), None
+            event("incoming%2Fmock+document.json", "incoming/second.json"), None
         )
     assert result == {"processed": 2}
     client.assert_called_once_with("s3")
     assert s3.mock_calls == [
-        call.get_object(Bucket="synthetic-test-bucket", Key="incoming/fake document.json"),
+        call.get_object(Bucket="synthetic-test-bucket", Key="incoming/mock document.json"),
         call.get_object(Bucket="synthetic-test-bucket", Key="incoming/second.json"),
     ]
     expected = {

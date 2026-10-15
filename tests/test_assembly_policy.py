@@ -127,6 +127,8 @@ def test_active_ci_has_no_aws_deployment_or_oidc_permissions():
     job = workflow["jobs"]["validate"]
     assert "permissions" not in job and "environment" not in job
     commands = "\n".join(step.get("run", "") for step in job["steps"])
+    commands += (root / "Makefile").read_text()
+    assert job["name"] == "Build and Validate"
     for forbidden in ["cdk deploy", "cdk bootstrap", "cdk destroy", "check_github_environment"]:
         assert forbidden not in commands
     for expected in [
@@ -150,13 +152,26 @@ def test_active_ci_has_no_aws_deployment_or_oidc_permissions():
                 assert forbidden not in step.get("run", "")
     security = workflow["jobs"]["security"]
     assert security["name"] == "Security Scan" and security["needs"] == "validate"
+    assert {s.get("run") for s in security["steps"]} >= {
+        "make semgrep",
+        "make trivy-dependencies",
+        "make trivy-iac",
+        "make trivy-runtime",
+        "make sbom",
+        "make kev",
+        "make security-decision",
+    }
+    assert '>> "$GITHUB_STEP_SUMMARY"' not in (root / ".github/workflows/ci.yml").read_text()
+    assert 'test ! -s "$GITHUB_STEP_SUMMARY"' in commands
+    gitleaks = next(s for s in job["steps"] if s.get("name") == "Scan Git history for secrets")
+    assert gitleaks["env"]["GITLEAKS_ENABLE_SUMMARY"] == "false"
     release = workflow["jobs"]["release-eligible"]
     assert "release_eligible == 'true'" in release["steps"][0]["env"]["APPROVED"]
     assert release["if"] == "always()"
     assert "inputs.scenario != 'real'" in release["name"]
-    assert "SYNTHETIC - no release approval" in release["name"]
+    assert "Release withheld" in release["name"]
     assert "exit 1" in release["steps"][0]["run"]
-    assert 'if [ "$SCENARIO" != \'real\' ]' in release["steps"][0]["run"]
+    assert "if [ \"$SCENARIO\" != 'real' ]" in release["steps"][0]["run"]
     # PyYAML's YAML 1.1 parser reads GitHub's unquoted 'on' key as True.
     triggers = workflow.get("on", workflow.get(True))
     assert set(triggers) == {"push", "pull_request", "workflow_dispatch", "schedule"}

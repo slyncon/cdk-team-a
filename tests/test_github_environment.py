@@ -20,7 +20,11 @@ def test_deployment_requires_protected_main_and_exact_environment_branch(
         if url.endswith("branches/main"):
             return {
                 "protected": protected,
-                "protection": {"required_status_checks": {"contexts": ["Validate team"]}},
+                "protection": {
+                    "required_status_checks": {
+                        "contexts": ["Build and Validate", "Security Scan", "Release eligible"]
+                    }
+                },
             }
         return {"deployment_branch_policy": {"custom_branch_policies": True}}
 
@@ -43,6 +47,22 @@ def test_missing_environment_keeps_deployment_disabled():
 
     def fetch(url):
         raise HTTPError(url, 404, "Not found", None, None)
+
+    assert not deployment_ready("example/claims", fetch)
+
+
+@pytest.mark.parametrize("missing", ["Build and Validate", "Security Scan", "Release eligible"])
+def test_every_current_required_check_is_needed(missing):
+    def fetch(url):
+        if url.endswith("deployment-branch-policies"):
+            return {"branch_policies": [{"name": "main", "type": "branch"}]}
+        if url.endswith("branches/main"):
+            checks = {"Build and Validate", "Security Scan", "Release eligible"} - {missing}
+            return {
+                "protected": True,
+                "protection": {"required_status_checks": {"contexts": sorted(checks)}},
+            }
+        return {"deployment_branch_policy": {"custom_branch_policies": True}}
 
     assert not deployment_ready("example/claims", fetch)
 

@@ -27,7 +27,7 @@ def deployment_ready(repository: str, fetch) -> bool:
     contexts = set(checks.get("contexts", []))
     contexts.update(check["context"] for check in checks.get("checks", []))
     return (
-        "Validate team" in contexts
+        {"Build and Validate", "Security Scan", "Release eligible"} <= contexts
         and policy.get("custom_branch_policies") is True
         and allowed == {("main", "branch")}
         and branch.get("protected") is True
@@ -61,7 +61,7 @@ if __name__ == "__main__":
     print(
         "Sandbox deployment enabled"
         if ready
-        else "Deployment disabled: require Validate team on main; restrict sandbox to main"
+        else "Deployment disabled: require build/security/release checks and main-only sandbox"
     )
     if output := os.getenv("GITHUB_OUTPUT"):
         with Path(output).open("a") as stream:

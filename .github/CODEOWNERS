@@ -9,3 +9,5 @@
 /security/ @slyncon
 /tests/test_security_gate.py @slyncon
 /SECURITY_DEMO.md @slyncon
+
+/Makefile @slyncon

@@ -2,11 +2,15 @@
 
 import copy
 import json
+import os
+import shutil
+import subprocess
 from datetime import date, timedelta
 
 import pytest
 
 from scripts.security_gate import (
+    ROOT,
     check_coverage,
     cvss_scores,
     demo_inputs,
@@ -37,7 +41,7 @@ def test_manual_scenarios(scenario, result, count):
     assert decision["result"] == result
     assert len(decision["findings"]) == count
     assert not decision["release_eligible"]
-    assert "SYNTHETIC" in decision["mode"]
+    assert decision["mode"] == "synthetic"
     if scenario == "combined-risk":
         assert len(decision["reasons"]) == 2
         assert any("CRITICAL" in reason for reason in decision["reasons"])
@@ -56,7 +60,7 @@ def test_critical_has_actual_cvss_and_version():
         {"component": "other-lib"},
         {"paths": ["other.txt"]},
         {"paths": ["*"]},
-        {"approved_by": "Demo developer"},
+        {"approved_by": "Mock developer"},
         {"owner": ""},
         {"statement": ""},
         {"expired_at": "2026-10-15T00:00:00Z"},
@@ -191,7 +195,7 @@ def test_default_real_mode_cannot_use_synthetic_files(tmp_path, monkeypatch):
     assert main() == 1
     real = json.loads((tmp_path / ".build/security/real/decision.json").read_text())
     assert not real["release_eligible"]
-    assert real["mode"] == "REAL SCAN"
+    assert real["mode"] == "real"
 
 
 def test_integrity_failure_blocks_even_clean_demo(tmp_path, monkeypatch):
@@ -201,8 +205,56 @@ def test_integrity_failure_blocks_even_clean_demo(tmp_path, monkeypatch):
     assert main() == 1
 
 
-def test_exception_stays_expired_after_presentation_date():
+def test_exception_stays_expired_after_test_date():
     findings, kev, exceptions = demo_inputs("exception-expired")
     assert (
         evaluate(findings, kev, exceptions, today=TODAY + timedelta(days=365))["result"] == "BLOCK"
     )
+
+
+def test_cli_tests_do_not_inherit_runner_outputs():
+    assert "GITHUB_STEP_SUMMARY" not in os.environ
+    assert "GITHUB_OUTPUT" not in os.environ
+
+
+@pytest.mark.parametrize(
+    "scenario",
+    ["clean", "high-cvss", "kev", "exception-approved", "exception-expired", "combined-risk"],
+)
+def test_summary_is_only_the_selected_scenario(tmp_path, monkeypatch, scenario):
+    monkeypatch.chdir(tmp_path)
+    summary, output = tmp_path / "summary.md", tmp_path / "output.txt"
+    monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(summary))
+    monkeypatch.setenv("GITHUB_OUTPUT", str(output))
+    monkeypatch.setattr("sys.argv", ["security_gate.py", "--scenario", scenario])
+    main()
+    text = summary.read_text()
+    assert text.count("## Security Scan:") == 1
+    assert text.startswith(f"## Security Scan: {scenario}\n")
+    assert "Mode: synthetic" in text
+    assert "Semgrep" not in text and "Trivy" not in text
+    assert "PRESENTATION" not in text and "FAKE" not in text
+    assert output.read_text() == "release_eligible=false\n"
+    decision = json.loads((tmp_path / ".build/security/synthetic/decision.json").read_text())
+    assert decision["scenario"] == scenario
+
+
+def test_same_cve_can_have_separate_scoped_exceptions():
+    findings, kev, exceptions = demo_inputs("exception-approved")
+    other = dict(exceptions[0], component="other-lib")
+    decision = evaluate(findings, kev, [other] + exceptions, today=TODAY)
+    assert decision["result"] == "ALLOW WITH EXCEPTION"
+    assert decision["findings"][0]["exception"]["component"] == "demo-lib"
+
+
+def test_make_records_and_propagates_a_missing_scanner(tmp_path):
+    shutil.copy2(ROOT / "Makefile", tmp_path / "Makefile")
+    completed = subprocess.run(
+        ["/usr/bin/make", "semgrep"],
+        cwd=tmp_path,
+        env={"PATH": "/usr/bin:/bin"},
+        capture_output=True,
+        text=True,
+    )
+    assert completed.returncode != 0
+    assert (tmp_path / ".build/security/real/status.tsv").read_text() == "semgrep\t127\n"

@@ -14,3 +14,6 @@ def offline_only(monkeypatch):
     monkeypatch.setattr(boto3, "client", forbidden)
     monkeypatch.setattr(socket.socket, "connect", forbidden)
     monkeypatch.delenv("TEAM", raising=False)
+    # CLI tests must never publish their fixture reports into the build job.
+    monkeypatch.delenv("GITHUB_STEP_SUMMARY", raising=False)
+    monkeypatch.delenv("GITHUB_OUTPUT", raising=False)

@@ -13,26 +13,14 @@ role, custom CloudFormation role or external boundary policy is required.
 
 ## Local validation
 
-Python 3.12, Node 24 LTS/npm, Git; AWS CLI v2 for manual AWS operations.
+Python 3.12, Node 24 LTS/npm, Make, Git; AWS CLI v2 for manual AWS operations.
 From this directory:
 
 ```bash
 python3.12 -m venv .venv
 source .venv/bin/activate
-python -m pip install --require-hashes -r requirements.lock
-python -m pip install --no-deps --no-build-isolation -r requirements.txt
-python -m pip check
-npm ci
-export PATH="$PWD/node_modules/.bin:$PATH"
-python -m ruff check .
-python -m pytest -q
-python -m bandit -r handler app.py stack.py scripts -ll
-python -m pip_audit --require-hashes --disable-pip -r requirements.lock
-npm audit --audit-level=high
-cdk ls
-cdk synth
-cdk-launchpad-validate .build/cdk.out
-python scripts/check_assembly.py .build/cdk.out
+make install
+make validate
 ```
 
 Platform 0.1.2 is installed at the full source commit in requirements.txt, not a
@@ -48,7 +36,7 @@ pip-compile --generate-hashes --allow-unsafe --strip-extras --no-header \
 
 ## CI validates and decides release eligibility
 
-On PRs, main pushes, manual workflow runs and scheduled scans, `Validate team`
+On PRs, main pushes, manual workflow runs and scheduled scans, `Build and Validate`
 runs secret scanning, lint, tests, Python/dependency audits, synthesis and both
 infrastructure validators. It saves the validated assembly/checksums for inspection.
 `Security Scan` then checks source with Semgrep and dependencies, the staged Lambda
@@ -63,7 +51,7 @@ An old ENABLE_SANDBOX_DEPLOYMENT setting cannot enable a removed job. The earlie
 workflow is preserved under `future/oidc-deployment.yml.disabled`, additionally
 hard-disabled, and is not ready for restoration. See future/README.md.
 
-Require `Validate team`, `Security Scan` and `Release eligible` on main and protected
+Require `Build and Validate`, `Security Scan` and `Release eligible` on main and protected
 review of workflows, dependencies, exceptions, stack and policy scripts. CODEOWNERS does not
 make reviews mandatory by itself. CI checks do not prevent an administrator from
 bypassing review and deploying different code manually.
@@ -115,7 +103,7 @@ the target. It creates standard supporting roles/assets; it does not require the
 archived IAM/OIDC template. The SSO permission set must authorize bootstrap and
 use of its roles. Review the diff/deploy approval. Keep CDKToolkit after the demo.
 
-## Demonstrate a fake claim
+## Demonstrate a synthetic claim
 
 ```bash
 CLAIMS_BUCKET=$(aws cloudformation describe-stacks --stack-name ClaimsTeamStack \
@@ -131,7 +119,7 @@ aws s3 cp fixtures/claim.json "s3://$CLAIMS_BUCKET/incoming/claim.json" \
 aws logs tail "$CLAIMS_LOG_GROUP" --since 10m --profile cdk-sso --region eu-central-1
 ```
 
-Wait briefly for asynchronous delivery if needed. The tiny JSON contains a fake
+Wait briefly for asynchronous delivery if needed. The tiny JSON contains a synthetic
 claim ID, category and amount; processing means read/validate/log, not approval or
 payment. No real health/insurance information is used. Duplicate events are safe.
 

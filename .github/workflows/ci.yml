@@ -9,7 +9,7 @@ on:
   workflow_dispatch:
     inputs:
       scenario:
-        description: 'real = genuine scans; all other options = SYNTHETIC / PRESENTATION ONLY'
+        description: 'Select real scans or a synthetic policy scenario'
         type: choice
         default: real
         required: true
@@ -56,25 +56,16 @@ jobs:
           GITLEAKS_VERSION: "8.30.1"
           GITLEAKS_ENABLE_COMMENTS: "false"
           GITLEAKS_ENABLE_UPLOAD_ARTIFACT: "false"
+          GITLEAKS_ENABLE_SUMMARY: "false"
       - name: Install immutable source and hashed dependencies
-        run: |
-          python -m pip install --require-hashes -r requirements.lock
-          python -m pip install --no-deps --no-build-isolation -r requirements.txt
-          python -m pip check
-          npm ci
-          echo "$PWD/node_modules/.bin" >> "$GITHUB_PATH"
+        run: make install
       - name: Lint, test, and scan application code and dependencies
         run: |
-          python -m ruff check .
-          python -m pytest -q
-          python -m bandit -r handler app.py stack.py scripts -ll
-          python -m pip_audit --require-hashes --disable-pip -r requirements.lock
-          npm audit --audit-level=high
+          make lint test audit
+          test ! -s "$GITHUB_STEP_SUMMARY"
+          echo "Build checks published no job summaries."
       - name: Synthesize and enforce infrastructure policy
-        run: |
-          cdk synth
-          cdk-launchpad-validate .build/cdk.out
-          python scripts/check_assembly.py .build/cdk.out
+        run: make synth
       - name: Record assembly integrity
         id: digest
         run: |
@@ -122,20 +113,40 @@ jobs:
           sha256sum -c .build/assembly.sha256
           find .build/cdk.out -type f -print0 | sort -z | xargs -0 sha256sum > .build/downloaded.sha256
           cmp .build/assembly.sha256 .build/downloaded.sha256
-          python scripts/security_prepare.py
+      - name: Prepare scan inputs
+        id: prepare
+        run: make security-prepare
       - name: Install verified scanners and pinned official Python security rules
         id: tools
         if: env.SCENARIO == 'real'
-        run: bash scripts/security_tools.sh
-      - name: Run Semgrep, Trivy, SBOM generation and official CISA retrieval
-        if: env.SCENARIO == 'real'
-        run: bash scripts/security_scan.sh
+        run: make security-tools
+      - name: Semgrep - Python source
+        if: always() && env.SCENARIO == 'real' && steps.tools.outcome == 'success' && steps.prepare.outcome == 'success'
+        run: make semgrep
+      - name: Trivy - dependencies
+        if: always() && env.SCENARIO == 'real' && steps.tools.outcome == 'success' && steps.prepare.outcome == 'success'
+        run: make trivy-dependencies
+      - name: Trivy - CloudFormation
+        if: always() && env.SCENARIO == 'real' && steps.tools.outcome == 'success' && steps.prepare.outcome == 'success'
+        run: make trivy-iac
+      - name: Trivy - Lambda artifact
+        if: always() && env.SCENARIO == 'real' && steps.tools.outcome == 'success' && steps.prepare.outcome == 'success'
+        run: make trivy-runtime
+      - name: Generate CycloneDX SBOMs
+        if: always() && env.SCENARIO == 'real' && steps.tools.outcome == 'success' && steps.prepare.outcome == 'success'
+        run: make sbom
+      - name: Show Trivy reports
+        if: always() && env.SCENARIO == 'real' && steps.tools.outcome == 'success' && steps.prepare.outcome == 'success'
+        run: make reports
+      - name: Retrieve CISA KEV intelligence
+        if: always() && env.SCENARIO == 'real' && steps.tools.outcome == 'success' && steps.prepare.outcome == 'success'
+        run: make kev
       - name: Evaluate security policy and explain the decision
         id: decision
         if: always()
         env:
-          SECURITY_PREREQUISITES_OK: ${{ steps.integrity.outcome == 'success' && (env.SCENARIO != 'real' || steps.tools.outcome == 'success') }}
-        run: python scripts/security_gate.py --scenario "$SCENARIO"
+          SECURITY_PREREQUISITES_OK: ${{ steps.integrity.outcome == 'success' && steps.prepare.outcome == 'success' && (env.SCENARIO != 'real' || steps.tools.outcome == 'success') }}
+        run: make security-decision
       - name: Save real scan reports and CycloneDX SBOMs
         if: always() && env.SCENARIO == 'real'
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -144,11 +155,11 @@ jobs:
           path: .build/security/real/
           if-no-files-found: error
           retention-days: 7
-      - name: Save synthetic presentation decision
+      - name: Save scenario report
         if: always() && env.SCENARIO != 'real'
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: security-SYNTHETIC-${{ env.SCENARIO }}-${{ github.run_id }}
+          name: security-${{ env.SCENARIO }}-${{ github.run_id }}
           path: .build/security/synthetic/
           if-no-files-found: error
           retention-days: 7
@@ -156,12 +167,12 @@ jobs:
   release-eligible:
     # Always execute so GitHub resolves the display name even for synthetic runs.
     # Synthetic runs must never replace the required genuine check context.
-    name: ${{ github.event_name == 'workflow_dispatch' && inputs.scenario != 'real' && 'SYNTHETIC - no release approval' || 'Release eligible' }}
+    name: ${{ github.event_name == 'workflow_dispatch' && inputs.scenario != 'real' && 'Release withheld' || 'Release eligible' }}
     needs: [validate, security]
     if: always()
     runs-on: ubuntu-latest
     steps:
-      - name: Record approval of this commit and validated artifact (no deployment)
+      - name: Check release eligibility
         env:
           SOURCE_SHA: ${{ github.sha }}
           ASSEMBLY_DIGEST: ${{ needs.validate.outputs.assembly_digest }}
@@ -169,12 +180,11 @@ jobs:
           APPROVED: ${{ needs.validate.result == 'success' && needs.security.result == 'success' && needs.security.outputs.release_eligible == 'true' }}
         run: |
           if [ "$SCENARIO" != 'real' ]; then
-            echo "SYNTHETIC / PRESENTATION ONLY: release approval withheld. Run real to assess this commit." >> "$GITHUB_STEP_SUMMARY"
+            echo "Release withheld for scenario $SCENARIO."
             exit 0
           fi
           if [ "$APPROVED" != 'true' ]; then
-            echo "Release blocked: genuine validation and security approval are required." >> "$GITHUB_STEP_SUMMARY"
+            echo "Release blocked: genuine validation and security approval are required."
             exit 1
           fi
-          echo "REAL SCAN approved commit $SOURCE_SHA and assembly manifest $ASSEMBLY_DIGEST" >> "$GITHUB_STEP_SUMMARY"
-          echo "Eligibility status only. Human review is still required. No AWS access or deployment." >> "$GITHUB_STEP_SUMMARY"
+          echo "Approved commit $SOURCE_SHA and assembly manifest $ASSEMBLY_DIGEST"
