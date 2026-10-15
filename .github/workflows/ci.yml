@@ -29,7 +29,7 @@ permissions:
 
 jobs:
   validate:
-    name: Validate team
+    name: Build and Validate
     runs-on: ubuntu-latest
     timeout-minutes: 15
     env:
