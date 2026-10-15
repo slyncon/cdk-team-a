@@ -1,0 +1,18 @@
+{
+  "label": "SYNTHETIC / PRESENTATION ONLY",
+  "findings": {
+    "critical": {"id": "CVE-2099-0001", "kind": "dependency", "severity": "CRITICAL", "component": "demo-lib", "scope": "requirements.txt", "cvss": [{"source": "mock", "version": "3.1", "score": 9.8}]},
+    "kev": {"id": "CVE-2099-0002", "kind": "dependency", "severity": "MEDIUM", "component": "demo-lib", "scope": "requirements.txt", "cvss": []},
+    "high": {"id": "CVE-2099-0003", "kind": "dependency", "severity": "HIGH", "component": "demo-lib", "scope": "requirements.txt", "cvss": []}
+  },
+  "mock_kev": ["CVE-2099-0002"],
+  "exception": {"id": "CVE-2099-0003", "paths": ["requirements.txt"], "component": "demo-lib", "statement": "Presentation only: temporary mitigation while a fixed version is tested.", "owner": "Demo developer", "approved_by": "Demo security reviewer", "expired_at": "2099-12-31T00:00:00Z"},
+  "scenarios": {
+    "clean": [],
+    "high-cvss": ["critical"],
+    "kev": ["kev"],
+    "exception-approved": ["high"],
+    "exception-expired": ["high"],
+    "combined-risk": ["critical", "kev"]
+  }
+}

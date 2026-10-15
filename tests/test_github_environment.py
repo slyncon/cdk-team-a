@@ -1,6 +1,6 @@
 import pytest
 
-from scripts.check_github_environment import deployment_ready
+from scripts.check_github_environment import deployment_ready, fetch_json
 
 
 @pytest.mark.parametrize(
@@ -45,3 +45,42 @@ def test_missing_environment_keeps_deployment_disabled():
         raise HTTPError(url, 404, "Not found", None, None)
 
     assert not deployment_ready("example/claims", fetch)
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "file:///etc/passwd",
+        "http://api.github.com/repos/example/claims",
+        "https://evil.example/repos/example/claims",
+        "https://api.github.com@evil.example/repos/example/claims",
+        "https://api.github.com/repos/example/claims?redirect=elsewhere",
+    ],
+)
+def test_fetch_rejects_untrusted_origins_before_network(url):
+    with pytest.raises(ValueError, match="fixed-origin"):
+        fetch_json(url)
+
+
+def test_fetch_json_uses_verified_https_and_closes_connection(monkeypatch):
+    import io
+
+    class Connection:
+        def __init__(self, host, timeout):
+            assert host == "api.github.com" and timeout == 20
+
+        def request(self, method, path, headers):
+            assert method == "GET" and path == "/repos/example/claims"
+
+        def getresponse(self):
+            response = io.BytesIO(b'{"protected": true}')
+            response.status = 200
+            return response
+
+        def close(self):
+            closed.append(True)
+
+    closed = []
+    monkeypatch.setattr("scripts.check_github_environment.HTTPSConnection", Connection)
+    assert fetch_json("https://api.github.com/repos/example/claims") == {"protected": True}
+    assert closed == [True]

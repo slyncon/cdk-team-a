@@ -122,7 +122,7 @@ def test_boundary_has_no_cloudformation_dependency_cycle(assembly):
 def test_active_ci_has_no_aws_deployment_or_oidc_permissions():
     root = Path(__file__).resolve().parents[1]
     workflow = yaml.safe_load((root / ".github/workflows/ci.yml").read_text())
-    assert set(workflow["jobs"]) == {"validate"}
+    assert set(workflow["jobs"]) == {"validate", "security", "release-eligible"}
     assert workflow["permissions"] == {"contents": "read"}
     job = workflow["jobs"]["validate"]
     assert "permissions" not in job and "environment" not in job
@@ -140,10 +140,25 @@ def test_active_ci_has_no_aws_deployment_or_oidc_permissions():
         "check_assembly",
     ]:
         assert expected in commands
-    for step in job["steps"]:
-        if action := step.get("uses"):
-            assert len(action.rsplit("@", 1)[1]) == 40
-            assert "configure-aws-credentials" not in action
+    for active_job in workflow["jobs"].values():
+        assert "permissions" not in active_job and "environment" not in active_job
+        for step in active_job["steps"]:
+            if action := step.get("uses"):
+                assert len(action.rsplit("@", 1)[1]) == 40
+                assert "configure-aws-credentials" not in action
+            for forbidden in ["cdk deploy", "cdk bootstrap", "cdk destroy"]:
+                assert forbidden not in step.get("run", "")
+    security = workflow["jobs"]["security"]
+    assert security["name"] == "Security Scan" and security["needs"] == "validate"
+    release = workflow["jobs"]["release-eligible"]
+    assert "release_eligible == 'true'" in release["steps"][0]["env"]["APPROVED"]
+    assert "inputs.scenario == 'real'" in release["if"] and "always()" in release["if"]
+    assert "SYNTHETIC - no release approval" in release["name"]
+    assert "exit 1" in release["steps"][0]["run"]
+    # PyYAML's YAML 1.1 parser reads GitHub's unquoted 'on' key as True.
+    triggers = workflow.get("on", workflow.get(True))
+    assert set(triggers) == {"push", "pull_request", "workflow_dispatch", "schedule"}
+    assert triggers["workflow_dispatch"]["inputs"]["scenario"]["default"] == "real"
     archive = yaml.safe_load((root / "future/oidc-deployment.yml.disabled").read_text())
     assert archive["jobs"]["deploy"]["if"].startswith("${{ false }}")
     assert not list((root / ".github/workflows").glob("*deploy*"))

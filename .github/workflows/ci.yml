@@ -6,6 +6,20 @@ on:
   pull_request:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      scenario:
+        description: 'real = genuine scans; all other options = SYNTHETIC / PRESENTATION ONLY'
+        type: choice
+        default: real
+        required: true
+        options:
+          - real
+          - clean
+          - high-cvss
+          - kev
+          - exception-approved
+          - exception-expired
+          - combined-risk
   schedule:
     - cron: "23 6 * * 1"
 
@@ -74,3 +88,89 @@ jobs:
             .build/assembly.sha256
           if-no-files-found: error
           retention-days: 7
+
+  security:
+    name: Security Scan
+    needs: validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      SCENARIO: ${{ github.event_name == 'workflow_dispatch' && inputs.scenario || 'real' }}
+      TRIVY_CACHE_DIR: ${{ github.workspace }}/.build/trivy-cache
+    outputs:
+      release_eligible: ${{ steps.decision.outputs.release_eligible }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.13'
+      - name: Download the validated assembly from this run
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: claims-assembly-${{ github.sha }}
+          path: .build
+      - name: Verify assembly and source integrity across jobs
+        id: integrity
+        env:
+          EXPECTED_DIGEST: ${{ needs.validate.outputs.assembly_digest }}
+        run: |
+          test "$(sha256sum .build/assembly.sha256 | cut -d ' ' -f 1)" = "$EXPECTED_DIGEST"
+          sha256sum -c .build/assembly.sha256
+          find .build/cdk.out -type f -print0 | sort -z | xargs -0 sha256sum > .build/downloaded.sha256
+          cmp .build/assembly.sha256 .build/downloaded.sha256
+          python scripts/security_prepare.py
+      - name: Install verified scanners and pinned official Python security rules
+        id: tools
+        if: env.SCENARIO == 'real'
+        run: bash scripts/security_tools.sh
+      - name: Run Semgrep, Trivy, SBOM generation and official CISA retrieval
+        if: env.SCENARIO == 'real'
+        run: bash scripts/security_scan.sh
+      - name: Evaluate security policy and explain the decision
+        id: decision
+        if: always()
+        env:
+          SECURITY_PREREQUISITES_OK: ${{ steps.integrity.outcome == 'success' && (env.SCENARIO != 'real' || steps.tools.outcome == 'success') }}
+        run: python scripts/security_gate.py --scenario "$SCENARIO"
+      - name: Save real scan reports and CycloneDX SBOMs
+        if: always() && env.SCENARIO == 'real'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: security-REAL-${{ github.sha }}-${{ github.run_id }}
+          path: .build/security/real/
+          if-no-files-found: error
+          retention-days: 7
+      - name: Save synthetic presentation decision
+        if: always() && env.SCENARIO != 'real'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: security-SYNTHETIC-${{ env.SCENARIO }}-${{ github.run_id }}
+          path: .build/security/synthetic/
+          if-no-files-found: error
+          retention-days: 7
+
+  release-eligible:
+    # Skipped checks count as successful in branch protection. Synthetic runs must
+    # never create/replace the required genuine 'Release eligible' check context.
+    name: ${{ github.event_name == 'workflow_dispatch' && inputs.scenario != 'real' && 'SYNTHETIC - no release approval' || 'Release eligible' }}
+    needs: [validate, security]
+    if: >-
+      always() &&
+      (github.event_name != 'workflow_dispatch' || inputs.scenario == 'real')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Record approval of this commit and validated artifact (no deployment)
+        env:
+          SOURCE_SHA: ${{ github.sha }}
+          ASSEMBLY_DIGEST: ${{ needs.validate.outputs.assembly_digest }}
+          APPROVED: ${{ needs.validate.result == 'success' && needs.security.result == 'success' && needs.security.outputs.release_eligible == 'true' }}
+        run: |
+          if [ "$APPROVED" != 'true' ]; then
+            echo "Release blocked: genuine validation and security approval are required." >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+          echo "REAL SCAN approved commit $SOURCE_SHA and assembly manifest $ASSEMBLY_DIGEST" >> "$GITHUB_STEP_SUMMARY"
+          echo "Eligibility status only. Human review is still required. No AWS access or deployment." >> "$GITHUB_STEP_SUMMARY"

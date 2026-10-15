@@ -3,9 +3,10 @@
 import json
 import os
 import re
+from http.client import HTTPSConnection
 from pathlib import Path
 from urllib.error import HTTPError
-from urllib.request import urlopen
+from urllib.parse import urlsplit
 
 
 def deployment_ready(repository: str, fetch) -> bool:
@@ -34,9 +35,25 @@ def deployment_ready(repository: str, fetch) -> bool:
 
 
 def fetch_json(url: str) -> dict:
-    # The caller builds URLs only from the fixed HTTPS GitHub API origin.
-    with urlopen(url, timeout=20) as response:  # nosec B310
+    # Enforce the fixed origin at the network boundary, including redirects/schemes.
+    parsed = urlsplit(url)
+    if (
+        parsed.scheme != "https"
+        or parsed.netloc != "api.github.com"
+        or not parsed.path.startswith("/repos/")
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise ValueError("Only fixed-origin GitHub repository API URLs are allowed")
+    connection = HTTPSConnection("api.github.com", timeout=20)
+    try:
+        connection.request("GET", parsed.path, headers={"User-Agent": "claims-ci"})
+        response = connection.getresponse()
+        if response.status != 200:
+            raise HTTPError(url, response.status, response.reason, response.headers, None)
         return json.load(response)
+    finally:
+        connection.close()
 
 
 if __name__ == "__main__":

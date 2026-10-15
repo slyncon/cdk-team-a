@@ -46,21 +46,25 @@ pip-compile --generate-hashes --allow-unsafe --strip-extras --no-header \
   --no-annotate --output-file requirements.lock requirements-deps.in
 ```
 
-## CI is validation-only
+## CI validates and decides release eligibility
 
 On PRs, main pushes, manual workflow runs and scheduled scans, `Validate team`
 runs secret scanning, lint, tests, Python/dependency audits, synthesis and both
-security gates. It saves the validated assembly/checksums for inspection. It has
-read-only repository permissions and never obtains AWS credentials or deploys.
-A green run is followed by your manual review/deployment of that same commit.
+infrastructure validators. It saves the validated assembly/checksums for inspection.
+`Security Scan` then checks source with Semgrep and dependencies, the staged Lambda
+and synthesized CloudFormation with Trivy, generates SBOMs, and evaluates CISA KEV
+and reviewed exceptions. `Release eligible` succeeds only after a genuine approved
+scan; it never deploys. All jobs use read-only repository permissions, without AWS
+credentials. See [SECURITY_DEMO.md](SECURITY_DEMO.md) for the manual scenario dropdown,
+current blocking finding and the interview walkthrough.
 
 There is no deployment job, id-token permission or required GitHub environment.
 An old ENABLE_SANDBOX_DEPLOYMENT setting cannot enable a removed job. The earlier
 workflow is preserved under `future/oidc-deployment.yml.disabled`, additionally
 hard-disabled, and is not ready for restoration. See future/README.md.
 
-Require `Validate team` on main and protected review of workflows, dependencies,
-stack and policy scripts when configuring GitHub protection. CODEOWNERS does not
+Require `Validate team`, `Security Scan` and `Release eligible` on main and protected
+review of workflows, dependencies, exceptions, stack and policy scripts. CODEOWNERS does not
 make reviews mandatory by itself. CI checks do not prevent an administrator from
 bypassing review and deploying different code manually.
 
@@ -86,7 +90,8 @@ preparation of this workflow.
 
 ## First manual deployment
 
-Wait for successful GitHub validation. Confirm SSO identity, then bootstrap once:
+Wait for genuine successful GitHub validation and release eligibility (synthetic
+green checks do not authorize deployment). Confirm SSO identity, then bootstrap once:
 
 ```bash
 aws sso login --profile cdk-sso

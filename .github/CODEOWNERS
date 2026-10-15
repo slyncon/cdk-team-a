@@ -6,3 +6,6 @@
 /scripts/ @slyncon
 /requirements* @slyncon
 /package*.json @slyncon
+/security/ @slyncon
+/tests/test_security_gate.py @slyncon
+/SECURITY_DEMO.md @slyncon
